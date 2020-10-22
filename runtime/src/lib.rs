@@ -17,6 +17,7 @@ use sp_runtime::traits::{
 };
 use sp_api::impl_runtime_apis;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
+use pallet_contracts_rpc_runtime_api::ContractExecResult;
 use pallet_grandpa::{AuthorityId as GrandpaId, AuthorityList as GrandpaAuthorityList};
 use pallet_grandpa::fg_primitives;
 use sp_version::RuntimeVersion;
@@ -37,6 +38,14 @@ pub use frame_support::{
 		constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight, WEIGHT_PER_SECOND},
 	},
 };
+use frame_system::{EnsureRoot, EnsureOneOf};
+use sp_core::{
+	u32_trait::{_1, _2,},
+};
+
+pub mod constants;
+use constants::{currency::*};
+mod weights;
 
 /// Import the template pallet.
 pub use pallet_template;
@@ -104,6 +113,11 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
 pub const MILLISECS_PER_BLOCK: u64 = 6000;
 
 pub const SLOT_DURATION: u64 = MILLISECS_PER_BLOCK;
+
+/*** Contracts Pallet Price Units***/
+pub const MILLICENTS: Balance = 1_000_000_000;
+pub const CENTS: Balance = 1_000 * MILLICENTS;
+pub const DOLLARS: Balance = 100 * CENTS;
 
 // Time is measured by number of blocks.
 pub const MINUTES: BlockNumber = 60_000 / (MILLISECS_PER_BLOCK as BlockNumber);
@@ -227,6 +241,97 @@ impl pallet_timestamp::Trait for Runtime {
 	type WeightInfo = ();
 }
 
+type EnsureRootOrHalfCouncil = EnsureOneOf<
+	AccountId,
+	EnsureRoot<AccountId>,
+	pallet_collective::EnsureProportionMoreThan<_1, _2, AccountId, CouncilCollective>
+>;
+
+/* pallet_contracts */
+parameter_types! {
+	pub const TombstoneDeposit: Balance = 16 * MILLICENTS;
+	pub const RentByteFee: Balance = 4 * MILLICENTS;
+	pub const RentDepositOffset: Balance = 1000 * MILLICENTS;
+	pub const SurchargeReward: Balance = 150 * MILLICENTS;
+}
+
+impl pallet_contracts::Trait for Runtime {
+	type Time = Timestamp;
+	type Randomness = RandomnessCollectiveFlip;
+	type Currency = Balances;
+	type Event = Event;
+	type DetermineContractAddress = pallet_contracts::SimpleAddressDeterminer<Runtime>;
+	type TrieIdGenerator = pallet_contracts::TrieIdFromParentCounter<Runtime>;
+	type RentPayment = ();
+	type SignedClaimHandicap = pallet_contracts::DefaultSignedClaimHandicap;
+	type TombstoneDeposit = TombstoneDeposit;
+	type StorageSizeOffset = pallet_contracts::DefaultStorageSizeOffset;
+	type RentByteFee = RentByteFee;
+	type RentDepositOffset = RentDepositOffset;
+	type SurchargeReward = SurchargeReward;
+	type MaxDepth = pallet_contracts::DefaultMaxDepth;
+	type MaxValueSize = pallet_contracts::DefaultMaxValueSize;
+	type WeightPrice = pallet_transaction_payment::Module<Self>;
+}
+
+parameter_types! {
+	pub const BasicDeposit: Balance = 10 * DOLLARS;
+	pub const FieldDeposit: Balance = 250 * CENTS;
+	pub const SubAccountDeposit: Balance = 2 * DOLLARS;
+	pub const MaxSubAccounts: u32 = 100;
+	pub const MaxAdditionalFields: u32 = 100;
+	pub const MaxRegistrars: u32 = 20;
+}
+
+impl pallet_identity::Trait for Runtime {
+	type Event = Event;
+	type Currency = Balances;
+	type BasicDeposit = BasicDeposit;
+	type FieldDeposit = FieldDeposit;
+	type SubAccountDeposit = SubAccountDeposit;
+	type MaxSubAccounts = MaxSubAccounts;
+	type MaxAdditionalFields = MaxAdditionalFields;
+	type MaxRegistrars = MaxRegistrars;
+	type Slashed = ();
+	type ForceOrigin = EnsureRootOrHalfCouncil;
+	type RegistrarOrigin = EnsureRootOrHalfCouncil;
+	type WeightInfo = weights::pallet_identity::WeightInfo<Runtime>;
+}
+
+parameter_types! {
+	pub const DepositBase: Balance = deposit(1, 88);
+	pub const DepositFactor: Balance = deposit(0, 32);
+	pub const MaxSignatories: u16 = 100;
+}
+
+impl pallet_multisig::Trait for Runtime {
+	type Event = Event;
+	type Call = Call;
+	type Currency = Balances;
+	type DepositBase = DepositBase;
+	type DepositFactor = DepositFactor;
+	type MaxSignatories = MaxSignatories;
+	type WeightInfo = weights::pallet_multisig::WeightInfo<Runtime>;
+}
+
+parameter_types! {
+	pub const CouncilMotionDuration: BlockNumber = 5 * DAYS;
+	pub const CouncilMaxProposals: u32 = 100;
+	pub const CouncilMaxMembers: u32 = 100;
+}
+
+type CouncilCollective = pallet_collective::Instance1;
+impl pallet_collective::Trait<CouncilCollective> for Runtime {
+	type Origin = Origin;
+	type Proposal = Call;
+	type Event = Event;
+	type MotionDuration = CouncilMotionDuration;
+	type MaxProposals = CouncilMaxProposals;
+	type MaxMembers = CouncilMaxMembers;
+	type DefaultVote = pallet_collective::PrimeDefaultVote;
+	type WeightInfo = weights::pallet_collective::WeightInfo<Runtime>;
+}
+
 parameter_types! {
 	pub const ExistentialDeposit: u128 = 500;
 	pub const MaxLocks: u32 = 50;
@@ -283,6 +388,10 @@ construct_runtime!(
 		Sudo: pallet_sudo::{Module, Call, Config<T>, Storage, Event<T>},
 		// Include the custom logic from the template pallet in the runtime.
 		TemplateModule: pallet_template::{Module, Call, Storage, Event<T>},
+		Contracts: pallet_contracts::{Module, Call, Config, Storage, Event<T>},
+		Identity: pallet_identity::{Module, Call, Storage, Event<T>},
+		Council: pallet_collective::<Instance1>::{Module, Call, Storage, Origin<T>, Event<T>, Config<T>},
+		Multisig: pallet_multisig::{Module, Call, Storage, Event<T>},
 	}
 );
 
@@ -320,6 +429,40 @@ pub type Executive = frame_executive::Executive<
 >;
 
 impl_runtime_apis! {
+	impl pallet_contracts_rpc_runtime_api::ContractsApi<Block, AccountId, Balance, BlockNumber> for Runtime {
+		fn call(
+			origin: AccountId,
+			dest: AccountId,
+			value: Balance,
+			gas_limit: u64,
+			input_data: Vec<u8>,
+		) -> ContractExecResult {
+			let (exec_result, gas_consumed) =
+				Contracts::bare_call(origin, dest.into(), value, gas_limit, input_data);
+				match exec_result {
+					Ok(v) => ContractExecResult::Success {
+						flags: v.flags.bits(),
+						data: v.data,
+						gas_consumed: gas_consumed,
+					},
+					Err(_) => ContractExecResult::Error,
+				}
+		}
+
+		fn get_storage(
+			address: AccountId,
+			key: [u8; 32],
+		) -> pallet_contracts_primitives::GetStorageResult {
+			Contracts::get_storage(address, key)
+		}
+
+		fn rent_projection(
+			address: AccountId,
+		) -> pallet_contracts_primitives::RentProjectionResult<BlockNumber> {
+			Contracts::rent_projection(address)
+		}
+	}
+
 	impl sp_api::Core<Block> for Runtime {
 		fn version() -> RuntimeVersion {
 			VERSION
